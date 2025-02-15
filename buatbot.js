@@ -5,14 +5,17 @@ const {
 } = require("./callback");
 const { createClient } = require("@supabase/supabase-js");
 const TelegramBot = require("node-telegram-bot-api");
-const tambahPesan = require("./tambah_pesan");
+const { tambahPesanHandler } = require("./tambah_pesan");
 
 const supabase = createClient(
   "https://gtftsindekhywtwmoeie.supabase.co",
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0ZnRzaW5kZWtoeXd0d21vZWllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjQxMjM0MTgsImV4cCI6MjAzOTY5OTQxOH0.t8z_I35XrHpdHz3QzLo05HS4THlOefcPf8rZElC6P9o"
 );
 
-// Fungsi untuk menjalankan bot berdasarkan token yang ada di database
+const bot = new TelegramBot("6479315189:AAFeJP48GZRF9saJ7bCu52c0NIel76X9T8U", {
+  polling: true,
+});
+
 const runBots = async () => {
   const { data: bots, error } = await supabase
     .from("user_bots")
@@ -28,13 +31,10 @@ const runBots = async () => {
 
     telegramBot.on("message", async (msg) => {
       const chatId = msg.chat.id;
+      const userMessage = msg.text && msg.text.trim().toLowerCase(); // Pastikan tidak null atau undefined
 
-      // Periksa jika perintah yang diterima adalah /start
-      if (msg.text.toLowerCase() === "/start") {
-        telegramBot.sendMessage(
-          chatId,
-          botData.start_message || "Selamat datang di Bot kami!"
-        );
+      if (!userMessage) {
+        telegramBot.sendMessage(chatId, "Pesan tidak boleh kosong.");
         return;
       }
 
@@ -45,19 +45,25 @@ const runBots = async () => {
         .eq("bot_id", botData.id);
 
       if (msgError) {
-        console.error(
-          "Terjadi kesalahan saat mengambil pesan balasan:",
-          msgError
+        console.error("Kesalahan saat mengambil pesan balasan:", msgError);
+        telegramBot.sendMessage(
+          chatId,
+          "Terjadi kesalahan saat memproses pesan."
         );
         return;
       }
 
       const message = messages.find(
-        (m) => m.message.toLowerCase() === msg.text.toLowerCase()
+        (m) => m.message.toLowerCase() === userMessage
       );
 
       if (message) {
-        if (message.callback_data) {
+        if (!message.response) {
+          telegramBot.sendMessage(chatId, "Balasan belum tersedia.");
+          return;
+        }
+
+        if (message.callback_data && message.button_name) {
           const options = {
             reply_markup: {
               inline_keyboard: [
@@ -84,21 +90,30 @@ const runBots = async () => {
       const callbackData = callbackQuery.data;
 
       const { data: callbackButtons, error: cbError } = await supabase
-        .from("callback_buttons")
-        .select("response")
+        .from("bot_messages")
+        .select("response_button")
         .eq("callback_data", callbackData)
         .eq("bot_id", botData.id);
 
       if (cbError) {
-        console.error(
-          "Terjadi kesalahan saat mengambil balasan callback:",
-          cbError
+        console.error("Kesalahan saat mengambil balasan callback:", cbError);
+        telegramBot.sendMessage(
+          chatId,
+          "Terjadi kesalahan saat memproses callback."
         );
         return;
       }
 
       if (callbackButtons.length > 0) {
-        telegramBot.sendMessage(chatId, callbackButtons[0].response);
+        const responseText = callbackButtons[0].response_button;
+        if (!responseText) {
+          telegramBot.sendMessage(
+            chatId,
+            "Balasan untuk callback tidak tersedia."
+          );
+          return;
+        }
+        telegramBot.sendMessage(chatId, responseText);
       } else {
         telegramBot.sendMessage(chatId, "Callback tidak dikenali.");
       }
@@ -108,6 +123,61 @@ const runBots = async () => {
 
 // Fungsi untuk membuat bot baru dengan token API
 module.exports = (bot) => {
+  // Menambahkan bot dengan perintah /add <token_bot>
+  bot.onText(/\/add (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const tokenApi = match[1].trim();
+
+    try {
+      // Membuat instance bot baru dengan token yang diberikan
+      const newBot = new TelegramBot(tokenApi);
+
+      // Mengambil informasi bot menggunakan getMe
+      const botInfo = await newBot.getMe();
+
+      if (!botInfo.username) {
+        bot.sendMessage(
+          chatId,
+          "❌ Token tidak valid atau bot tidak ditemukan."
+        );
+        return;
+      }
+
+      const botName = botInfo.username;
+
+      // Simpan bot ke database
+      const { data, error } = await supabase.from("user_bots").insert([
+        {
+          user_id: chatId,
+          token: tokenApi,
+          bot_name: botName,
+          start_message: "Selamat datang di bot baru Anda!",
+        },
+      ]);
+
+      if (error) {
+        console.error("Gagal menyimpan bot ke database:", error);
+        bot.sendMessage(chatId, "❌ Terjadi kesalahan saat menyimpan bot.");
+        return;
+      }
+
+      bot.sendMessage(chatId, `✅ Bot @${botName} berhasil ditambahkan!`, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🤖 Setting Bot 🔧", callback_data: "buat_bot" }],
+          ],
+        },
+      });
+    } catch (error) {
+      console.error("Gagal mengambil data bot:", error);
+      bot.sendMessage(
+        chatId,
+        "❌ Token tidak valid atau tidak dapat mengambil data bot."
+      );
+    }
+  });
+
+  // Menampilkan daftar bot
   bot.on("callback_query", async (callbackQuery) => {
     const chatId = callbackQuery.message.chat.id;
     const data = callbackQuery.data;
@@ -119,10 +189,10 @@ module.exports = (bot) => {
         .eq("user_id", chatId);
 
       if (error) {
-        console.error("Terjadi kesalahan dalam mengambil daftar bot:", error);
+        console.error("Terjadi kesalahan saat mengambil daftar bot:", error);
         bot.sendMessage(
           chatId,
-          "Terjadi kesalahan dalam mengambil daftar bot."
+          "❌ Terjadi kesalahan dalam mengambil daftar bot."
         );
         return;
       }
@@ -130,85 +200,32 @@ module.exports = (bot) => {
       if (bots.length === 0) {
         bot.sendMessage(
           chatId,
-          "Anda belum memiliki bot. Silakan buat bot baru dengan memasukkan token API bot."
+          "Anda belum memiliki bot. Tambahkan bot dengan perintah: \n\n`/add token_bot` \n\nJika belum memiliki bot silahkan buat terlrbih dahulu di @BotFather dan ikuti instrusi nya.",
+          { parse_mode: "Markdown" }
         );
-
-        // Tunggu pengguna mengirim token API
-        bot.once("message", async (msg) => {
-          const tokenApi = msg.text.trim();
-
-          try {
-            // Buat instance bot Telegram dengan token yang diberikan
-            const newBot = new TelegramBot(tokenApi);
-
-            // Ambil informasi bot menggunakan getMe
-            const botInfo = await newBot.getMe();
-
-            const botName = botInfo.username || "Bot Tanpa Nama";
-
-            // Simpan bot ke dalam database
-            const { data, error: insertError } = await supabase
-              .from("user_bots")
-              .insert([
-                {
-                  user_id: chatId,
-                  token: tokenApi,
-                  bot_name: botName,
-                  start_message: "Selamat datang di bot baru Anda!",
-                },
-              ]);
-
-            if (insertError) {
-              console.error("Gagal menyimpan bot ke database:", insertError);
-              return bot.sendMessage(
-                chatId,
-                "❌ Terjadi kesalahan saat menyimpan bot."
-              );
-            }
-
-            bot.sendMessage(
-              chatId,
-              `✅ Bot ${botName} berhasil dibuat dan disimpan!`
-            );
-            runBots(); // Jalankan semua bot yang terdaftar
-          } catch (error) {
-            console.error("Gagal mengambil data bot:", error);
-            bot.sendMessage(
-              chatId,
-              "❌ Token tidak valid atau tidak dapat mengambil data bot."
-            );
-          }
-        });
       } else {
-        // Mendapatkan nama pengguna
-        const currentTime = new Date().toLocaleString(); // Mendapatkan waktu saat ini
+        const currentTime = new Date().toLocaleString();
 
-        // Pesan pembuka dengan nama pengguna dan waktu
-        let botListMessage = `🌟 *berikut adalah daftar bot Anda:* 🌟\n\n`;
+        let botListMessage = `🌟 *Daftar Bot Anda:* 🌟\n\n`;
         botListMessage += `📅 *Waktu saat ini:* ${currentTime}\n\n`;
 
-        // Menambahkan daftar bot yang dimiliki pengguna
         bots.forEach((botItem, index) => {
-          botListMessage += `\n${index + 1}. 🤖 *${
+          botListMessage += `\n${index + 1}. 🤖 *@${
             botItem.bot_name
-          } (Status ✅)* \n\n\n\`Tekan tombol dibawah untuk setting bot:\``;
+          }* (✅ Aktif)\nTekan tombol di bawah untuk pengaturan bot.\n\n`;
         });
 
-        // Menyiapkan tombol inline untuk setiap bot
         const options = {
           reply_markup: {
-            inline_keyboard: [
-              ...bots.map((botItem) => [
-                {
-                  text: `🤖 ${botItem.bot_name}`,
-                  callback_data: `bot_${botItem.id}`,
-                },
-              ]),
-            ],
+            inline_keyboard: bots.map((botItem) => [
+              {
+                text: `⚙️ Kelola @${botItem.bot_name}`,
+                callback_data: `bot_${botItem.id}`,
+              },
+            ]),
           },
         };
 
-        // Mengirim pesan dengan format yang lebih menarik
         bot.sendMessage(chatId, botListMessage, {
           parse_mode: "Markdown",
           reply_markup: options.reply_markup,
@@ -228,48 +245,30 @@ module.exports = (bot) => {
         return;
       }
 
-      // Mengakses chat dari callbackQuery untuk mendapatkan nama pengguna
-      const userName = callbackQuery.message.chat.first_name; // Menggunakan `callbackQuery` di sini
+      const userName = callbackQuery.message.chat.first_name;
+      const currentTime = new Date().toLocaleString();
+      const userId = callbackQuery.from.id;
 
-      const currentTime = new Date().toLocaleString(); // Mendapatkan waktu saat ini
-
-      // Pesan yang akan ditampilkan
       const commandListMessage = `
-    🌟 *Selamat datang ${userName}!* 🌟
-    
-    ⚙️ *Bot: ${botInfo.bot_name}*  
-    
-    🕒 *Waktu Saat Ini: ${currentTime}*  
-    
-    📜 *Perintah Bot:*
-    
-    1️⃣ /start - Pesan Balasan: 
-        *"${botInfo.start_message}"*
-    
-    Anda dapat menambahkan atau mengubah pesan balasan bot di sini.
-    
-    🎛️ Pengaturan lainnya dapat diakses melalui tombol di bawah ini.
-    `;
+🌟 *Selamat datang, ${userName}!* 🌟
+
+⚙️ *Bot: @${botInfo.bot_name}*  
+
+🕒 *Waktu Saat Ini: ${currentTime}*  
+
+📜 *Pengaturan Bot:*
+1️⃣ Tambahkan atau ubah pesan balasan bot.
+
+🔧 Pilih pengaturan bot melalui tombol di bawah ini.
+`;
 
       const options = {
         reply_markup: {
           inline_keyboard: [
             [
               {
-                text: "➕ Tambah Pesan Balasan 📝",
-                callback_data: `add_message_${botInfo.id}`,
-              },
-            ],
-            [
-              {
-                text: "✏️ Edit Pesan Start ✍️",
-                callback_data: `edit_start_message_${botInfo.id}`,
-              },
-            ],
-            [
-              {
-                text: "⚙️ Pengaturan Callback 🔧",
-                callback_data: `setting_callback_${botInfo.id}`,
+                text: "📝 Atur Pesan Balasan",
+                url: `http://xcreate.rf.gd/telegram/bot/tambah_pesan.php?id_user=${userId}`,
               },
             ],
             [
@@ -288,7 +287,7 @@ module.exports = (bot) => {
         },
       };
 
-      bot.sendMessage(callbackQuery.message.chat.id, commandListMessage, {
+      bot.sendMessage(chatId, commandListMessage, {
         parse_mode: "Markdown",
         reply_markup: options.reply_markup,
       });
@@ -296,6 +295,30 @@ module.exports = (bot) => {
       bot.on("callback_query", async (callbackQuery) => {
         const chatId = callbackQuery.message.chat.id;
         const callbackData = callbackQuery.data;
+
+        const messageId = callbackQuery.message.message_id;
+
+        // Memeriksa jika callback_data adalah untuk menambahkan pesan balasan
+        if (callbackData.startsWith("add_message_")) {
+          const userId = callbackQuery.from.id; // ID pengguna yang menekan tombol
+
+          bot.sendMessage(
+            userId,
+            "Klik tombol di bawah untuk menambahkan pesan:",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: "Tambah Pesan",
+                      url: `http://xcreate.rf.gd/telegram/bot/tambah_pesan.php?id_user=${userId}`,
+                    },
+                  ],
+                ],
+              },
+            }
+          );
+        }
 
         // Memeriksa apakah callback_data adalah untuk menghapus bot
         if (callbackData.startsWith("hapus_bot_")) {
@@ -358,18 +381,8 @@ module.exports = (bot) => {
       };
       bot.sendMessage(chatId, buttonsMessage, options);
       // Menangani callback dari tombol "➕ Tambah Pesan Balasan"
-      bot.on("callback_query", async (callbackQuery) => {
-        const chatId = callbackQuery.message.chat.id;
-        const messageId = callbackQuery.message.message_id;
-        const callbackData = callbackQuery.data;
-
-        // Memeriksa jika callback_data adalah untuk menambahkan pesan balasan
-        if (callbackData.startsWith("add_message_")) {
-          const botId = callbackData.split("_")[2]; // Mendapatkan botId dari callback_data
-          await tambahPesan(bot, chatId, botId); // Memanggil fungsi tambahPesan dengan botId
-        }
-      });
-    } else if (data.startsWith("add_callback_")) {
+    } // Fungsi untuk menambahkan tombol callback
+    else if (data.startsWith("add_callback_")) {
       const botId = data.split("_")[2];
 
       // Proses untuk menambahkan tombol callback
@@ -378,17 +391,31 @@ module.exports = (bot) => {
         "Masukkan nama tombol callback yang akan ditambahkan."
       );
 
-      bot.once("message", async (msg) => {
-        const buttonName = msg.text;
+      // Listener sementara untuk memproses pesan dari pengguna yang sesuai chatId
+      const messageListener = async (msg) => {
+        if (msg.chat.id !== chatId) return; // Hanya memproses pesan dari pengguna yang sesuai
+
+        const buttonName = msg.text.trim();
         bot.sendMessage(chatId, "Masukkan data callback untuk tombol ini.");
 
-        bot.once("message", async (msg) => {
-          const callbackData = msg.text;
+        // Menghapus listener setelah menerima pesan pertama
+        bot.removeListener("message", messageListener);
+
+        // Listener kedua untuk data callback
+        const secondMessageListener = async (msg) => {
+          if (msg.chat.id !== chatId) return;
+
+          const callbackData = msg.text.trim();
           bot.sendMessage(chatId, "Masukkan balasan untuk tombol ini.");
 
-          bot.once("message", async (msg) => {
-            const response = msg.text;
+          // Menghapus listener kedua setelah menerima data callback
+          bot.removeListener("message", secondMessageListener);
 
+          // Listener ketiga untuk balasan tombol
+          const thirdMessageListener = async (msg) => {
+            if (msg.chat.id !== chatId) return;
+
+            const response = msg.text.trim();
             const result = await addCallbackButton(
               botId,
               buttonName,
@@ -396,10 +423,25 @@ module.exports = (bot) => {
               response
             );
             bot.sendMessage(chatId, result);
-          });
-        });
-      });
-    } else if (data.startsWith("edit_callback_")) {
+
+            // Menghapus listener ketiga setelah selesai
+            bot.removeListener("message", thirdMessageListener);
+          };
+
+          // Menunggu balasan untuk tombol
+          bot.on("message", thirdMessageListener);
+        };
+
+        // Menunggu data callback
+        bot.on("message", secondMessageListener);
+      };
+
+      // Menunggu nama tombol callback
+      bot.on("message", messageListener);
+    }
+
+    // Fungsi untuk mengedit tombol callback
+    else if (data.startsWith("edit_callback_")) {
       const botId = data.split("_")[2];
 
       // Menampilkan daftar tombol callback yang sudah ada
@@ -432,35 +474,45 @@ module.exports = (bot) => {
       };
 
       bot.sendMessage(chatId, callbackListMessage, options);
-    } else if (data.startsWith("edit_response_")) {
+    }
+
+    // Fungsi untuk mengedit balasan tombol callback
+    else if (data.startsWith("edit_response_")) {
       const callbackId = data.split("_")[2];
       bot.sendMessage(chatId, "Masukkan balasan baru untuk tombol ini.");
 
-      bot.once("message", async (msg) => {
-        const newResponse = msg.text;
+      // Listener sementara untuk mengedit balasan
+      const editListener = async (msg) => {
+        if (msg.chat.id !== chatId) return; // Hanya memproses pesan dari pengguna yang sesuai
 
+        const newResponse = msg.text.trim();
         const result = await editCallbackResponse(callbackId, newResponse);
         bot.sendMessage(chatId, result);
-      });
-    }
-  });
 
-  bot.on("callback_query", async (callbackQuery) => {
-    const chatId = callbackQuery.message.chat.id;
-    const callbackData = callbackQuery.data;
+        // Menghapus listener setelah selesai
+        bot.removeListener("message", editListener);
+      };
 
-    // Mengedit pesan start
-    if (callbackData.startsWith("edit_start_message_")) {
-      const botId = callbackData.split("_")[3];
-      await editStartMessage(bot, chatId, botId); // Panggil fungsi edit pesan start
+      // Menunggu balasan untuk edit
+      bot.on("message", editListener);
     }
+  }),
+    bot.on("callback_query", async (callbackQuery) => {
+      const chatId = callbackQuery.message.chat.id;
+      const callbackData = callbackQuery.data;
 
-    // Menghapus bot
-    if (callbackData.startsWith("hapus_bot_")) {
-      const botId = callbackData.split("_")[2];
-      await hapusBot(bot, chatId, botId); // Panggil fungsi hapus bot
-    }
-  });
+      // Mengedit pesan start
+      if (callbackData.startsWith("edit_start_message_")) {
+        const botId = callbackData.split("_")[3];
+        await editStartMessage(bot, chatId, botId); // Panggil fungsi edit pesan start
+      }
+
+      // Menghapus bot
+      if (callbackData.startsWith("hapus_bot_")) {
+        const botId = callbackData.split("_")[2];
+        await hapusBot(bot, chatId, botId); // Panggil fungsi hapus bot
+      }
+    });
 
   const editStartMessage = async (bot, chatId, botId) => {
     try {
@@ -470,14 +522,16 @@ module.exports = (bot) => {
       // Meminta input pesan start baru dari pengguna
       bot.sendMessage(chatId, "Silakan masukkan pesan Start baru:");
 
-      bot.once("message", async (msg) => {
+      const messageListener = async (msg) => {
+        if (msg.chat.id !== chatId) return; // Hanya memproses pesan dari pengguna yang mengirim perintah
+
         const newStartMessage = msg.text.trim();
 
         // Update pesan start di database
         const { error } = await supabase
           .from("user_bots")
           .update({ start_message: newStartMessage })
-          .eq("id", botId); // Pastikan botId dikirim sebagai integer
+          .eq("id", botId);
 
         if (error) {
           console.error("Gagal mengupdate pesan start:", error);
@@ -488,7 +542,10 @@ module.exports = (bot) => {
         }
 
         bot.sendMessage(chatId, "✅ Pesan Start berhasil diperbarui!");
-      });
+        bot.removeListener("message", messageListener); // Hapus listener setelah pesan diterima
+      };
+
+      bot.on("message", messageListener);
     } catch (err) {
       console.error("Error saat edit pesan start:", err);
       bot.sendMessage(chatId, "❌ Terjadi kesalahan yang tidak terduga.");
