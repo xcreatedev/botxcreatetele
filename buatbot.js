@@ -12,10 +12,6 @@ const supabase = createClient(
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0ZnRzaW5kZWtoeXd0d21vZWllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjQxMjM0MTgsImV4cCI6MjAzOTY5OTQxOH0.t8z_I35XrHpdHz3QzLo05HS4THlOefcPf8rZElC6P9o"
 );
 
-const bot = new TelegramBot("6479315189:AAFeJP48GZRF9saJ7bCu52c0NIel76X9T8U", {
-  polling: true,
-});
-
 const runBots = async () => {
   const { data: bots, error } = await supabase
     .from("user_bots")
@@ -26,19 +22,41 @@ const runBots = async () => {
     return;
   }
 
-  bots.forEach((botData) => {
+  const botInstances = new Map();
+
+  const startBot = (botData) => {
+    console.log(`🔄 Memulai bot: ${botData.bot_name} (${botData.id})`);
+
+    if (botInstances.has(botData.token)) {
+      botInstances.get(botData.token).stopPolling();
+      console.log(`⚠️ Bot ${botData.bot_name} dihentikan sebelum restart`);
+    }
+
     const telegramBot = new TelegramBot(botData.token, { polling: true });
+    botInstances.set(botData.token, telegramBot);
 
     telegramBot.on("message", async (msg) => {
       const chatId = msg.chat.id;
-      const userMessage = msg.text && msg.text.trim().toLowerCase(); // Pastikan tidak null atau undefined
+      const userMessage = msg.text && msg.text.trim().toLowerCase();
+
+      console.log(
+        `📩 Pesan diterima: "${userMessage}" dari chat ID: ${chatId}`
+      );
 
       if (!userMessage) {
         telegramBot.sendMessage(chatId, "Pesan tidak boleh kosong.");
         return;
       }
 
-      // Periksa apakah ada pesan balasan yang sesuai di database
+      if (userMessage === "/restart") {
+        telegramBot.sendMessage(chatId, "Bot sedang di-restart...");
+        setTimeout(() => {
+          startBot(botData);
+          telegramBot.sendMessage(chatId, "Bot berhasil di-restart.");
+        }, 1000);
+        return;
+      }
+
       const { data: messages, error: msgError } = await supabase
         .from("bot_messages")
         .select("message, callback_data, response, button_name")
@@ -58,6 +76,8 @@ const runBots = async () => {
       );
 
       if (message) {
+        console.log(`✅ Pesan cocok, mengirim balasan: "${message.response}"`);
+
         if (!message.response) {
           telegramBot.sendMessage(chatId, "Balasan belum tersedia.");
           return;
@@ -81,6 +101,7 @@ const runBots = async () => {
           telegramBot.sendMessage(chatId, message.response);
         }
       } else {
+        console.log(`❌ Perintah tidak dikenali: "${userMessage}"`);
         telegramBot.sendMessage(chatId, "Perintah tidak dikenali.");
       }
     });
@@ -88,6 +109,8 @@ const runBots = async () => {
     telegramBot.on("callback_query", async (callbackQuery) => {
       const chatId = callbackQuery.message.chat.id;
       const callbackData = callbackQuery.data;
+
+      console.log(`📌 Callback diterima: ${callbackData}`);
 
       const { data: callbackButtons, error: cbError } = await supabase
         .from("bot_messages")
@@ -106,6 +129,7 @@ const runBots = async () => {
 
       if (callbackButtons.length > 0) {
         const responseText = callbackButtons[0].response_button;
+        console.log(`✅ Callback cocok, mengirim balasan: "${responseText}"`);
         if (!responseText) {
           telegramBot.sendMessage(
             chatId,
@@ -115,10 +139,31 @@ const runBots = async () => {
         }
         telegramBot.sendMessage(chatId, responseText);
       } else {
+        console.log("❌ Callback tidak dikenali.");
         telegramBot.sendMessage(chatId, "Callback tidak dikenali.");
       }
     });
-  });
+  };
+
+  bots.forEach(startBot);
+
+  console.log("📡 Menunggu perubahan di Supabase...");
+
+  supabase
+    .channel("user_bots_channel")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "user_bots" },
+      (payload) => {
+        console.log("🆕 Bot baru ditambahkan di database:", payload);
+        if (payload.new) {
+          startBot(payload.new);
+        }
+      }
+    )
+    .subscribe((status) => {
+      console.log(`🟢 Status Subscriptions: ${status}`);
+    });
 };
 
 // Fungsi untuk membuat bot baru dengan token API
